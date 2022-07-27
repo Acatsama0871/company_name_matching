@@ -13,7 +13,7 @@ ProgressBar().register()
 
 # params
 the_scheduler = 'processes'
-num_workers = 6
+num_workers = 3
 num_candidates = 10
 candidates_threshold = 60
 to_remove_words_list = [
