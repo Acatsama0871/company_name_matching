@@ -1,11 +1,10 @@
 import os
-from sched import scheduler
 import dask
 import pickle
 import numpy as np
 import pandas as pd
 import dask.dataframe as dd
-from thefuzz import process
+from thefuzz import fuzz
 from dask.diagnostics import ProgressBar
 from typing import List, Tuple, Dict
 ProgressBar().register()
@@ -13,9 +12,8 @@ ProgressBar().register()
 
 # params
 the_scheduler = 'processes'
-num_workers = 3
-num_candidates = 10
-candidates_threshold = 60
+num_workers = 10
+focus_weight=0.8
 to_remove_words_list = [
     "inc",
     "inc.",
@@ -24,7 +22,6 @@ to_remove_words_list = [
     "l.l.c.",
     "l.l.c",
     "co.",
-    "capital",
     "securities",
     "security",
     "s.a.",
@@ -37,31 +34,28 @@ to_remove_words_list = [
     "s.p.a.",
     "s.p.a",
     "sa",
-    "corporation",
     "ab",
     "trust",
-    "capital",
     "limited",
-    "corp",
     "ltd",
     "ltd.",
 ]
 
+replace_dict = {'bank corporation': 'bank', 'bank corporate': 'bank', 'bank corp': 'bank'}
+
+
 
 # global variables
-with open(os.path.join('data', '03_feature', 'search_list.pkl'), 'rb') as f:
-    search_list = pickle.load(f)
-with open(os.path.join('data', '03_feature', 'search_df_full_name2id.pkl'), 'rb') as f:
-    search_df_full_name2id = pickle.load(f)
-with open(os.path.join('data', '03_feature', 'search_df_preprocessed2full_name.pkl'), 'rb') as f:
-    search_df_preprocessed2full_name = pickle.load(f)
+with open(os.path.join('data', '03_feature', 'search_df.pkl'), 'rb') as f:
+    search_df = pickle.load(f)
 
 # functions
-def preprocess(cur_txt: str, to_remove_words_list: List = to_remove_words_list) -> str:
+def preprocess(cur_txt: str, to_remove_words_list: List=to_remove_words_list, replace_dict: Dict=replace_dict) -> str:
     """
     Preprocess names before matching:
     1. remove commas
-    2. remove words in to_remove_words_list
+    2. replace by name
+    3. remove words in to_remove_words_list
 
     Args:
         cur_txt (str): current name
@@ -70,78 +64,85 @@ def preprocess(cur_txt: str, to_remove_words_list: List = to_remove_words_list) 
     Returns:
         str: preprocessed equity name
     """
+    #* 0. lower the name
+    cur_txt = cur_txt.lower()
+    #* 1. replace comma
     cur_txt = cur_txt.replace(",", "")
+    #* 2. replace by name
+    for cur_key in replace_dict:
+        if cur_key in cur_txt:
+            cur_txt = cur_txt.replace(cur_key, replace_dict[cur_key])
+            break
+    #* 3. remove words in to_remove_words_list
     cur_txt = cur_txt.split(" ")
     result_str_list = [
-        cur_word.lower()
+        cur_word
         for cur_word in cur_txt
-        if cur_word.lower() not in to_remove_words_list
+        if cur_word not in to_remove_words_list
     ]
 
     return " ".join(result_str_list).strip()
 
-def extract_func(
-    cur_txt: str,
-    search_list: List[str],
-    limit: int = num_candidates,
-    threshold: float = candidates_threshold,
-) -> List[Tuple[str, float]]:
+def extract_func(cur_focus_txt: str, cur_txt: str, search_df: pd.DataFrame) -> Tuple[str, str, str, float]:
     """
-    
-    Extract fuzzy matched results from search_list and return a list of candidates.
-    
+    Extract the top match from the search_df via fuzzy matching.
+    This version uses the focus_weight to control the weight of the focus_txt.
+    The matched score = focus_weight * partial_ratio(cur_focus_txt, cur_search_string) + (1 - focus_weight) * ratio(cur_txt, cur_search_string)
+    Only return return the top match.
+
     Args:
-        cur_txt (str): equity name
-        search_list (List[str]): list of names to search
-        limit (int): number of candidates to return
-        threshold (float): minimum candidates' similarity threshold, ignore all results below this threshold
+        cur_focus_txt (str): the focus text (top n word(s))
+        cur_txt (str): the full name to be matched
+        search_df (pd.DataFrame): df contains all candidates
 
     Returns:
-        List[Tuple[str, float]]: list of candidates
+        Tuple[str, str, str, float]: focus_txt, matched_name, matched_id, matched_score
     """
-    extract_results = process.extract(cur_txt, search_list, limit=limit)
+    cur_df = search_df.copy()
+    cur_df['cur_focus_search_score'] = cur_df['preprocessed'].apply(lambda x: fuzz.partial_ratio(cur_focus_txt, x))
+    cur_df['cur_simple_score'] = cur_df['preprocessed'].apply(lambda x: fuzz.ratio(cur_txt, x))
+    cur_df['final_score'] = cur_df['cur_focus_search_score'] * focus_weight + cur_df['cur_simple_score'] * (1 - focus_weight)
+    cur_df = cur_df.sort_values('final_score', ascending=False)
+    
+    # return the first one
+    return cur_focus_txt, cur_df.iloc[0]['Full Name'], cur_df.iloc[0]['No. '], cur_df.iloc[0]['final_score']
 
-    return [
-        cur_extract for cur_extract in extract_results if cur_extract[1] >= threshold
-    ]
-
-# format helper functions
-def extract_top_match_name(cur_matched_list: List[Tuple[str, float]], search_df_preprocessed2full_name: Dict) -> str:
-    return search_df_preprocessed2full_name[cur_matched_list[0][0]] if cur_matched_list else np.nan
-
-def extract_top_match_score(cur_matched_list: List[Tuple[str, float]]) -> int:
-    return cur_matched_list[0][1] if cur_matched_list else np.nan
-
-def full_name2id(cur_full_name: str, search_df_full_name2id: Dict[str, int]) -> int:
-    return int(search_df_full_name2id[cur_full_name]) if isinstance(cur_full_name, str) else np.nan
-
-def all_matched2full_name(cur_matched_list: List[Tuple[str, float]], search_df_preprocessed2full_name: Dict[str, str]) -> List[Tuple[str, float]]:
-    ret_list = []
-    if not cur_matched_list:
-        return np.nan
-    for cur_tuple in cur_matched_list:
-        temp = (search_df_preprocessed2full_name[cur_tuple[0]], cur_tuple[1])
-        ret_list.append(temp)
-
-    return ret_list
+def keep_fist_n(cur_txt: str, n=1) -> str:
+    """
+    keep first n words of the name
+    """
+    cur_txt_list = cur_txt.split(' ')
+    return ' '.join(cur_txt_list[:n])
 
 @dask.delayed
 def process_one(cur_path: str) -> None:
     # load current target data
     cur_target = pd.read_csv(os.path.join('data', '04_splits', cur_path))
     # preprocess target data
-    cur_target['preprocessed'] = cur_target['ISSUER_NAME'].apply(preprocess)
+    cur_target['preprocessed'] = cur_target['Target Name'].apply(preprocess)
     # matching
     matched_df = cur_target.copy()
-    matched_df['matched'] = cur_target['preprocessed'].apply(lambda x: extract_func(x, search_list))
-    # post process
-    matched_df = matched_df.drop(columns=['preprocessed'])
-    matched_df['Top Match Name'] = matched_df['matched'].apply(lambda x: extract_top_match_name(x, search_df_preprocessed2full_name))
-    matched_df['Top Match Score'] = matched_df['matched'].apply(extract_top_match_score)
-    matched_df['Top Match No.'] = matched_df['Top Match Name'].apply(lambda x: full_name2id(x, search_df_full_name2id))
-    matched_df['All Matched'] = matched_df['matched'].apply(lambda x: all_matched2full_name(x, search_df_preprocessed2full_name))
-    matched_df = matched_df[['ISSUER_NAME', 'No. ', 'Top Match Name', 'Top Match No.', 'Top Match Score', 'All Matched']].copy()
-    matched_df.columns = ['Target Name', 'Target No.', 'Top Match Name', 'Top Match No.', 'Top Match Score', 'All Matched']
+    cur_first_dict = {1: 'First', 2: 'Second', 3: 'Third'}
+    for cur_first_n in range(1, 4):
+        # get target df
+        cur_target_df = cur_target.copy()
+        cur_target_df['cur_focus_target'] = cur_target_df['preprocessed'].apply(keep_fist_n, n=cur_first_n)
+        # apply function
+        cur_focus_txt_list = []
+        cur_matched_name_list = []
+        cur_matched_no_list = []
+        cur_matched_score_list = []
+        for _, cur_row in cur_target_df.iterrows():
+            cur_focus_txt, cur_matched_name, cur_matched_no, cur_matched_score = extract_func(cur_row['cur_focus_target'], cur_row['preprocessed'], search_df)
+            cur_focus_txt_list.append(cur_focus_txt)
+            cur_matched_name_list.append(cur_matched_name)
+            cur_matched_no_list.append(cur_matched_no)
+            cur_matched_score_list.append(cur_matched_score)
+        # add to matched df
+        matched_df[f'{cur_first_dict[cur_first_n]} word'] = cur_focus_txt_list
+        matched_df[f'Top matched name for {cur_first_dict[cur_first_n]} word'] = cur_matched_name_list
+        matched_df[f'Top matched No. for {cur_first_dict[cur_first_n]} word'] = cur_matched_no_list
+        matched_df[f'Matched score for {cur_first_dict[cur_first_n]} word'] = cur_matched_score_list
     # save result
     matched_df.to_csv(os.path.join('data', '05_results', cur_path), index=False)
 
@@ -154,5 +155,5 @@ if __name__ == '__main__':
     dask.compute(*delayed_objects, scheduler=the_scheduler, num_workers=num_workers)
     # sort and merge
     merged_df = dd.read_csv(os.path.join('data', '05_results', '*.csv'))
-    merged_df = merged_df.sort_values(by=['Top Match Score'], ascending=False)
+    merged_df = merged_df.sort_values(by='Target Name', ascending=True)
     merged_df.to_csv(os.path.join('data', '06_merged_results', 'merged_df.csv'), index=False, single_file=True)
