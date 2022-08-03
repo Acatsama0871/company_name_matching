@@ -12,7 +12,7 @@ ProgressBar().register()
 
 # params
 the_scheduler = 'processes'
-num_workers = 3
+num_workers = 10
 focus_weight=0.8
 to_remove_words_list = [
     "inc",
@@ -149,11 +149,11 @@ def process_one(cur_path: str) -> None:
 
 if __name__ == '__main__':
     # compute
-    path_list = [os.listdir(os.path.join('data', '04_splits'))[0]] #! debug
+    path_list = os.listdir(os.path.join('data', '04_splits'))
     print(f"Start computing with {len(path_list)} partitions.")
     delayed_objects = [process_one(cur_path) for cur_path in path_list]
     dask.compute(*delayed_objects, scheduler=the_scheduler, num_workers=num_workers)
     # sort and merge
     merged_df = dd.read_csv(os.path.join('data', '05_results', '*.csv'))
-    merged_df = merged_df.sort_values(by=['Target Name', 'Matched score for First word'], ascending=[True, False])
+    merged_df = merged_df.sort_values(by='Target Name', ascending=True)
     merged_df.to_csv(os.path.join('data', '06_merged_results', 'merged_df.csv'), index=False, single_file=True)
