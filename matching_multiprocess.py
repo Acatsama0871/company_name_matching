@@ -18,7 +18,7 @@ num_workers = 10
 focus_weight = 0.99
 return_first_n_matches = 10
 match_base_on_first_n_words = 1
-n_partitions = 10
+n_partitions = 200
 to_remove_words_list = [
     "inc",
     "inc.",
